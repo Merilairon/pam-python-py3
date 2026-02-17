@@ -1,0 +1,18 @@
+diff --git a/pam_python.c b/pam_python.c
+index 4f3b1c1..c9a3d2a 100644
+--- a/pam_python.c
++++ b/pam_python.c
+@@ -1,7 +1,11 @@
+-#include <Python.h>
++#include <python3.12/Python.h>  /* adjust to your version */
+
+ static int python_initialized = 0;
+
+ static void init_python(void)
+ {
+-    Py_Initialize();
++    if (!python_initialized) {
++        Py_Initialize();
++        python_initialized = 1;
++    }
+ }
