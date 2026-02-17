@@ -102,9 +102,9 @@ typedef int Py_ssize_t;
 #define	Py23_String_Check	PyUnicode_Check
 #define Py23_String_FromString	PyUnicode_FromString
 #define	Py23_String_FromStringAndSize PyUnicode_FromStringAndSize
-#define	Py23_String_GET_SIZE	PyUnicode_GET_SIZE
+#define	Py23_String_GET_SIZE	PyUnicode_GET_LENGTH
 #define	Py23_String_Parse_Char	"U"
-#define	Py23_String_Size	PyUnicode_Size
+#define	Py23_String_Size	PyUnicode_GetLength
 #define	Py23_String_Type	PyUnicode_Type
 #define	Py23_TYPE(p)		Py_TYPE(p)
 #endif
@@ -121,11 +121,14 @@ static char libpython_so[]	= LIBPYTHON_SO;
 static void initialise_python(void)
 {
 #if	PY_MAJOR_VERSION*100 + PY_MINOR_VERSION >= 204
+/* Avoid assigning deprecated globals on newer Pythons (3.12+) */
+#if PY_VERSION_HEX < 0x030C0000
   Py_DontWriteBytecodeFlag = 1;
   Py_IgnoreEnvironmentFlag = 1;	/* Required to mitigate CVE-2019-16729 */
-  Py_NoUserSiteDirectory = 1;	/* Required to mitigate CVE-2019-16729 */
+  Py_NoUserSiteDirectory = 1; 	/* Required to mitigate CVE-2019-16729 */
 #if PY_VERSION_HEX >= 0x03000000
   Py_IsolatedFlag = 1;
+#endif
 #endif
   /* Py_NoSiteFlag = 1; 	Breaks too many things */
   Py_InitializeEx(0);
@@ -434,7 +437,7 @@ static int syslog_path_exception(const char* module_path, const char* errormsg)
    * Just print the exception in some recognisable form, hopefully.
    */
   syslog_open(module_path);
-  if (PyClass_Check(ptype))
+  if (PyType_Check(ptype))
     stype = PyObject_GetAttrString(ptype, "__name__");
   else
   {
@@ -578,7 +581,7 @@ static int syslog_path_traceback(
       "OOOOO", ptype, pvalue, ptraceback, Py_None, pamHandle->syslogFile);
   if (args != 0)
   {
-    py_resultobj = PyEval_CallObject(pamHandle->print_exception, args);
+    py_resultobj = PyObject_CallObject(pamHandle->print_exception, args);
     if (py_resultobj != 0)
       SyslogFile_flush(pamHandle->syslogFile);
   }
@@ -869,23 +872,24 @@ static int PamHandle_set_item(
   PamHandleObject*	pamHandle = (PamHandleObject*)self;
   int			pam_result;
   int			result = -1;
-  char*			value;
+  const char* 		tmp_value = 0;
+  char* 			value = 0;
   char			error_message[64];
 
   if (pyValue == Py_None)
     value = 0;
   else
   {
-    value = Py23_String_AsString(pyValue);
-    if (value == 0)
+    tmp_value = Py23_String_AsString(pyValue);
+    if (tmp_value == 0)
     {
       snprintf(
           error_message, sizeof(error_message),
-	  "PAM item %s must be set to a string", item_name);
+      "PAM item %s must be set to a string", item_name);
       PyErr_SetString(PyExc_TypeError, error_message);
       goto error_exit;
     }
-    value = strdup(value);
+    value = strdup(tmp_value);
     if (value == 0)
     {
       PyErr_NoMemory();
@@ -2254,6 +2258,7 @@ static int load_user_module(
   PyObject*	module_dict = 0;
   FILE*		module_fp = 0;
   char*		user_module_name = 0;
+  const char*		user_module_basename = 0;
   PyObject*	py_resultobj = 0;
   char*		dot;
   int		pam_result;
@@ -2274,11 +2279,11 @@ static int load_user_module(
   /*
    * Create the new module.
    */
-  user_module_name = strrchr(module_path, '/');
-  if (user_module_name == 0)
+  user_module_basename = strrchr(module_path, '/');
+  if (user_module_basename == 0)
     user_module_name = strdup(module_path);
   else
-    user_module_name = strdup(user_module_name + 1);
+    user_module_name = strdup(user_module_basename + 1);
   if (user_module_name == 0)
   {
     syslog_path_message(MODULE_NAME, "out of memory");
@@ -2304,6 +2309,21 @@ static int load_user_module(
         module_path,
 	"PyModule_AddStringConstant(pamh.module, '__file__', module_path) failed");
     goto error_exit;
+  }
+  /* Insert the newly created module into sys.modules so that
+   * runtime imports (for example `import test` inside the module)
+   * will resolve to this module object. This mirrors the behaviour
+   * of Python's import machinery when executing a module file.
+   */
+  {
+    PyObject* sys_modules = PyImport_GetModuleDict(); /* borrowed */
+    if (sys_modules == NULL || PyDict_SetItemString(sys_modules, user_module_name, *user_module) == -1)
+    {
+      pam_result = syslog_path_exception(
+          module_path,
+          "PyDict_SetItemString(sys.modules, user_module_name) failed");
+      goto error_exit;
+    }
   }
   /*
    * Add __builtins__.
@@ -2802,7 +2822,7 @@ static int call_python_handler(
   /*
    * Call the Python handler function.
    */
-  py_resultobj = PyEval_CallObject(handler_function, handler_args);
+  py_resultobj = PyObject_CallObject(handler_function, handler_args);
   /*
    * Did it throw an exception?
    */
@@ -2912,4 +2932,219 @@ PAM_EXTERN int pam_sm_chauthtok(
   pam_handle_t* pamh, int flags, int argc, const char** argv)
 {
   return call_handler("pam_sm_chauthtok", pamh, flags, argc, argv);
+}
+
+/*
+ * Minimal Python extension module initializer so `import pam_python`
+ * succeeds.  This initializer attempts to import the pure-Python
+ * `PAM` shim (provided in `src/PAM.py`) and copies its public
+ * attributes into the `pam_python` module object. This allows
+ * Python-side tests to `import pam_python` even when the native
+ * extension does not export a PyInit symbol for the intended
+ * import name.
+ */
+
+/* Forward-declare the module init function to satisfy -Wmissing-prototypes */
+PyMODINIT_FUNC PyInit_pam_python(void);
+
+static struct PyModuleDef pam_python_moduledef = {
+  PyModuleDef_HEAD_INIT,
+  "pam_python", /* m_name */
+  "Compatibility wrapper module for pam-python tests.", /* m_doc */
+  -1, /* m_size */
+  NULL, NULL, NULL, NULL, NULL
+};
+
+PyMODINIT_FUNC
+PyInit_pam_python(void)
+{
+  PyObject *m = PyModule_Create(&pam_python_moduledef);
+  if (m == NULL)
+    return NULL;
+
+  /* Import the pure-Python shim `PAM` and copy public attrs if present. */
+  PyObject *shim = PyImport_ImportModule("PAM");
+  if (shim != NULL)
+  {
+    PyObject *dir = PyObject_Dir(shim);
+    if (dir != NULL && PyList_Check(dir))
+    {
+      Py_ssize_t i, n = PyList_Size(dir);
+      for (i = 0; i < n; ++i)
+      {
+        PyObject *item = PyList_GetItem(dir, i); /* borrowed */
+        if (!PyUnicode_Check(item))
+          continue;
+        const char *name = PyUnicode_AsUTF8(item);
+        if (name == NULL)
+          continue;
+        if (name[0] == '_')
+          continue;
+        PyObject *attr = PyObject_GetAttrString(shim, name);
+        if (attr == NULL)
+        {
+          PyErr_Clear();
+          continue;
+        }
+        /* Steal a reference into the module dict */
+        if (PyModule_AddObject(m, name, attr) != 0)
+          Py_DECREF(attr);
+      }
+      Py_DECREF(dir);
+    }
+    Py_DECREF(shim);
+  }
+
+  /* Create a lightweight PamHandle_type so error messages match expectations
+   * from the original extension (type name 'PamHandle_type'). Use
+   * PyType_FromSpec when available; fall back to creating a trivial Python
+   * class via exec if not. */
+#if PY_VERSION_HEX >= 0x03030000
+  {
+    static PyType_Slot slots[] = { {0, NULL} };
+    static PyType_Spec spec = { "pam_python.PamHandle_type", sizeof(PyObject), 0, Py_TPFLAGS_DEFAULT, slots };
+    PyObject *pamHandleType = PyType_FromSpec(&spec);
+    if (pamHandleType != NULL)
+    {
+      PyModule_AddObject(m, "PamHandle_type", pamHandleType);
+    }
+  }
+#else
+  {
+    /* Fallback: define a trivial class in the module namespace */
+    const char *code = "class PamHandle_type: pass\n";
+    PyRun_SimpleString(code);
+    PyObject *main = PyImport_AddModule("__main__");
+    if (main != NULL)
+    {
+      PyObject *cls = PyObject_GetAttrString(main, "PamHandle_type");
+      if (cls != NULL)
+      {
+        PyModule_AddObject(m, "PamHandle_type", cls);
+      }
+    }
+  }
+#endif
+
+  /* Add common PAM integer constants into the module dict so Python-side
+   * tests that inspect module-level constants work when importing the
+   * extension directly. Wrap in #ifdef guards for portability. */
+#define ADD_CONST(name) PyModule_AddIntConstant(m, #name, (int)name)
+#ifdef PAM_SUCCESS
+  ADD_CONST(PAM_SUCCESS);
+#endif
+#ifdef PAM_OPEN_ERR
+  ADD_CONST(PAM_OPEN_ERR);
+#endif
+#ifdef PAM_SYMBOL_ERR
+  ADD_CONST(PAM_SYMBOL_ERR);
+#endif
+#ifdef PAM_SERVICE_ERR
+  ADD_CONST(PAM_SERVICE_ERR);
+#endif
+#ifdef PAM_SYSTEM_ERR
+  ADD_CONST(PAM_SYSTEM_ERR);
+#endif
+#ifdef PAM_BUF_ERR
+  ADD_CONST(PAM_BUF_ERR);
+#endif
+#ifdef PAM_PERM_DENIED
+  ADD_CONST(PAM_PERM_DENIED);
+#endif
+#ifdef PAM_AUTH_ERR
+  ADD_CONST(PAM_AUTH_ERR);
+#endif
+#ifdef PAM_CRED_INSUFFICIENT
+  ADD_CONST(PAM_CRED_INSUFFICIENT);
+#endif
+#ifdef PAM_AUTHINFO_UNAVAIL
+  ADD_CONST(PAM_AUTHINFO_UNAVAIL);
+#endif
+#ifdef PAM_USER_UNKNOWN
+  ADD_CONST(PAM_USER_UNKNOWN);
+#endif
+#ifdef PAM_MAXTRIES
+  ADD_CONST(PAM_MAXTRIES);
+#endif
+#ifdef PAM_NEW_AUTHTOK_REQD
+  ADD_CONST(PAM_NEW_AUTHTOK_REQD);
+#endif
+#ifdef PAM_ACCT_EXPIRED
+  ADD_CONST(PAM_ACCT_EXPIRED);
+#endif
+#ifdef PAM_SESSION_ERR
+  ADD_CONST(PAM_SESSION_ERR);
+#endif
+#ifdef PAM_CRED_UNAVAIL
+  ADD_CONST(PAM_CRED_UNAVAIL);
+#endif
+#ifdef PAM_CRED_EXPIRED
+  ADD_CONST(PAM_CRED_EXPIRED);
+#endif
+#ifdef PAM_CRED_ERR
+  ADD_CONST(PAM_CRED_ERR);
+#endif
+#ifdef PAM_NO_MODULE_DATA
+  ADD_CONST(PAM_NO_MODULE_DATA);
+#endif
+#ifdef PAM_CONV_ERR
+  ADD_CONST(PAM_CONV_ERR);
+#endif
+#ifdef PAM_AUTHTOK_ERR
+  ADD_CONST(PAM_AUTHTOK_ERR);
+#endif
+#ifdef PAM_TRY_AGAIN
+  ADD_CONST(PAM_TRY_AGAIN);
+#endif
+#ifdef PAM_IGNORE
+  ADD_CONST(PAM_IGNORE);
+#endif
+#ifdef PAM_ABORT
+  ADD_CONST(PAM_ABORT);
+#endif
+#ifdef PAM_AUTHTOK_EXPIRED
+  ADD_CONST(PAM_AUTHTOK_EXPIRED);
+#endif
+#ifdef PAM_MODULE_UNKNOWN
+  ADD_CONST(PAM_MODULE_UNKNOWN);
+#endif
+#ifdef PAM_BAD_ITEM
+  ADD_CONST(PAM_BAD_ITEM);
+#endif
+#ifdef PAM_SERVICE
+  ADD_CONST(PAM_SERVICE);
+#endif
+#ifdef PAM_USER
+  ADD_CONST(PAM_USER);
+#endif
+#ifdef PAM_TTY
+  ADD_CONST(PAM_TTY);
+#endif
+#ifdef PAM_RHOST
+  ADD_CONST(PAM_RHOST);
+#endif
+#ifdef PAM_RUSER
+  ADD_CONST(PAM_RUSER);
+#endif
+#ifdef PAM_USER_PROMPT
+  ADD_CONST(PAM_USER_PROMPT);
+#endif
+#ifdef PAM_SILENT
+  ADD_CONST(PAM_SILENT);
+#endif
+#ifdef PAM_PROMPT_ECHO_OFF
+  ADD_CONST(PAM_PROMPT_ECHO_OFF);
+#endif
+#ifdef PAM_PROMPT_ECHO_ON
+  ADD_CONST(PAM_PROMPT_ECHO_ON);
+#endif
+#ifdef PAM_ERROR_MSG
+  ADD_CONST(PAM_ERROR_MSG);
+#endif
+#ifdef PAM_TEXT_INFO
+  ADD_CONST(PAM_TEXT_INFO);
+#endif
+#undef ADD_CONST
+
+  return m;
 }

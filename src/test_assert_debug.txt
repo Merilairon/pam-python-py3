@@ -1,0 +1,5 @@
+EXPECTED:
+['pam_sm_authenticate', ('error', "('Symbol not found', 2)"), ('error', "('Symbol not found', 2)"), ('error', "('Symbol not found', 2)"), ('error', "('Symbol not found', 2)"), ('error', "('Symbol not found', 2)")]
+
+RESULTS:
+['pam_sm_authenticate', ('PamException', "pam_sm_acct_mgmt() isn't defined"), ('PamException', "pam_sm_setcred() isn't defined"), ('PamException', "pam_sm_open_session() isn't defined"), ('PamException', "pam_sm_close_session() isn't defined"), ('PamException', "pam_sm_chauthtok() isn't defined")]

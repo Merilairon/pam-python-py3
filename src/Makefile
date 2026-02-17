@@ -11,7 +11,13 @@ pam_python.so: pam_python.c setup.py Makefile
 	CFLAGS="$(CFLAGS) $(WARNINGS) -I/usr/local/lib/ " ./setup.py build --debug
 	@#CFLAGS="$(CFLAGS) -Og $(WARNINGS)" ./setup.py build --debug
 	@#CFLAGS="$(CFLAGS) -Og $(WARNINGS)" Py_DEBUG=1 ./setup.py build --debug
-	ln -sf build/lib.*/$@ .
+	# Some Python build installs names the shared object with the
+	# CPython tag (eg pam_python.cpython-314-...so). Ensure a stable
+	# filename `pam_python.so` exists inside the build output and create
+	# the top-level symlink to it.
+	f=$$(find build -maxdepth 2 -type f -name 'pam_python*.so' -print -quit); \
+	if [ -n "$$f" ]; then cp -f "$$f" "$$(dirname "$$f")/pam_python.so"; fi; \
+	ln -sf build/lib.*/pam_python.so .
 
 .PHONY: install install-lib
 install: install-lib
@@ -38,7 +44,7 @@ test-pam_python.pam: test-pam_python.pam.in Makefile
 
 .PHONY: test
 test: pam_python.so ctest /etc/pam.d/test-pam_python.pam
-	python test.py
+	python3 test.py
 	./ctest python
 
 test-pam_python-installed.pam: test-pam_python.pam.in Makefile
@@ -50,5 +56,5 @@ test-pam_python-installed.pam: test-pam_python.pam.in Makefile
 
 .PHONY: installed-test
 installed-test: ctest /etc/pam.d/test-pam_python-installed.pam
-	python test.py
+	python3 test.py
 	./ctest python

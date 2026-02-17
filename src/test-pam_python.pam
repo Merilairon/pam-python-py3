@@ -1,0 +1,4 @@
+auth	required	/home/baetensjan/Documents/Projects/pam-python-py3/src/pam_python.so /home/baetensjan/Documents/Projects/pam-python-py3/src/test.py
+account	required	/home/baetensjan/Documents/Projects/pam-python-py3/src/pam_python.so /home/baetensjan/Documents/Projects/pam-python-py3/src/test.py arg1 arg2
+password required	/home/baetensjan/Documents/Projects/pam-python-py3/src/pam_python.so /home/baetensjan/Documents/Projects/pam-python-py3/src/test.py
+session	required	/home/baetensjan/Documents/Projects/pam-python-py3/src/pam_python.so /home/baetensjan/Documents/Projects/pam-python-py3/src/test.py

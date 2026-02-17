@@ -43,6 +43,7 @@ RELEASE_SOURCES = \
 	src/ctest.c \
 	src/Makefile \
 	src/pam_python.c \
+	src/pam_python.so \
 	src/setup.py \
 	src/test-pam_python.pam.in \
 	src/test.py

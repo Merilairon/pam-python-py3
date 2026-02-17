@@ -1,4 +1,4 @@
-#!/usr/bin/python2 -W default
+#!/usr/bin/env python3
 #
 # This is the test script for libpython-pam.  There aren't many stones
 # left unturned.
@@ -69,12 +69,24 @@ def pam_conv(auth, query_list, userData=None):
 # Verify the results match.
 #
 def assert_results(expected_results, results):
-  for i in range(min(len(expected_results), len(results))):
-    assert expected_results[i] == results[i], (i, expected_results[i], results[i])
-  if len(expected_results) < len(results):
-    assert len(expected_results) == len(results), (i, results[len(expected_results)])
-  else:
-    assert len(expected_results) == len(results), (i, expected_results[len(results)])
+  try:
+    for i in range(min(len(expected_results), len(results))):
+      assert expected_results[i] == results[i], (i, expected_results[i], results[i])
+    if len(expected_results) < len(results):
+      assert len(expected_results) == len(results), (i, results[len(expected_results)])
+    else:
+      assert len(expected_results) == len(results), (i, expected_results[len(results)])
+  except AssertionError as e:
+    # Dump diagnostics to a file to aid debugging in this environment.
+    try:
+      with open('test_assert_debug.txt', 'w') as fh:
+        fh.write('EXPECTED:\n')
+        fh.write(repr(expected_results) + '\n')
+        fh.write('\nRESULTS:\n')
+        fh.write(repr(results) + '\n')
+    except Exception:
+      pass
+    raise
 
 #
 # Test all the calls happen.
