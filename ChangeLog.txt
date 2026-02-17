@@ -1,3 +1,10 @@
+
+pam-python-2.0.0 Tue, 17 Feb 2026 16:18:56 +0100
+
+  New: Python3 support has been added
+  New: Add PAM configuration and debug files for testing: service_args_debug.json, test-pam_python.pam, test_assert_debug.txt.
+  Change: Removed LICENSE file.
+
 pam-python-1.0.8 Thu,  5 Nov 2020 19:37:07 +1000
 
   New: Move towards python3 support.
